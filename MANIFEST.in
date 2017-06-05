@@ -1,0 +1,13 @@
+include install.sh
+include VERSION
+include RELEASE
+
+# RNAlib
+recursive-include external/RNAlib *
+recursive-exclude external/RNAlib *.o *.so *.a
+
+# Examples
+recursive-include  examples *  
+
+# sfold
+# recursive-include external/sfold

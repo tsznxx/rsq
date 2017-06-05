@@ -1,0 +1,3 @@
+fisher >= 0.1.4
+ngslib>=1.1.10
+numpy >= 1.4.1

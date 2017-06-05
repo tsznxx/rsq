@@ -1,0 +1,1013 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#Last-modified: 19 Feb 2015 09:10:27 AM
+
+#########################################################################
+#         Module/Scripts Description
+# 
+# Copyright (c) 2014 Yunfei Wang <Yunfei.Wang1@utdallas.edu>
+# 
+# This code is free software; you can redistribute it and/or modify it
+# under the terms of the BSD License (see the file COPYING included with
+# the distribution).
+# 
+# @status:  experimental
+# @version: 1.1.0
+# @author:  Yunfei Wang
+# @contact: yfwang0405@gmail.com
+#########################################################################
+
+# ------------------------------------
+# python modules
+# ------------------------------------
+
+import os
+import sys
+import numpy
+import bisect
+import ngslib
+import shutil
+import argparse
+import functools
+import rsq
+import collections
+import pkg_resources
+from multiprocessing import Pool, freeze_support, Lock, Value
+
+
+# ------------------------------------
+# constants and globals
+# ------------------------------------
+
+# debug option
+rsq.debug = False
+debug = False
+counter = None
+lock = None
+
+const_dict = {'|':{'|':'|','x':'.','.':'|'}, 'x':{'x':'x','.':'x','|':'.'},'.':{'.':'.','x':'x','|':'|'}}
+
+# ------------------------------------
+# Misc functions
+# ------------------------------------
+
+def ArgParser(arglst):
+    parser=argparse.ArgumentParser(prog='rsq',usage=argparse.SUPPRESS,description="Program: %(prog)s {0} (Python Package for RNA structurome quantification using RNA footprinting data.)".format(version()),epilog='dependency rsq, ngslib')
+
+    options = parser.add_argument_group('Sub commands')
+    options.add_argument('FastD', help='FastD file utilities.')
+    options.add_argument('FastC', help='FastC file utilities.')
+    options.add_argument('fold', help='Fold RNA structures.')
+    options.add_argument('FastS', help='FastS utilities.')
+    options.add_argument('isoform', help="Deal with isoform cases.")
+    options.add_argument('quantify', help='Quantification of RNA structures.')
+    options.add_argument('draw', help='Draw RNA secondary structures.')
+    options.add_argument('fitness',help="Fitness between sequencing depth (FastD) and structure (FastS).")
+    
+    
+    # Sub commands parsers
+    par_dict = {None:parser}
+    
+    ##################################################
+    # Sub command: FastD
+    ##################################################
+    P = argparse.ArgumentParser(prog='rsq FastD',usage=argparse.SUPPRESS,description="Program: %(prog)s (Generating FastD format data.)",epilog='dependency rsq,ngslib')
+
+    options =  P.add_argument_group('Sub commands')
+    options.add_argument('generate', help='Generating FastD file from Next-Generation sequencing data.')
+    options.add_argument('merge', help='Merge FastD files based on predefined weights.')
+    par_dict['FastD'] = {None:P}
+
+    # FastD generate
+    p = argparse.ArgumentParser(prog='rsq FastD generate',description="Program: %(prog)s (Generating FastD format data.)",epilog='dependency rsq,ngslib')
+
+    options1 = p.add_argument_group('Input option 1')
+    options1.add_argument("-f",dest="fafile",type=str,metavar="sce_genes.fasta", required=False,default=None,help="Gene sequence in Fasta format.")
+    options1.add_argument("-S",dest="S",type=str,metavar="sce_S1.tab",required=False,default=None,help="S1 depth data in 'GeneID\t[...]\t0;3;5;...;8' format.")
+    options1.add_argument("-V",dest="V",type=str,metavar="sce_V1.tab",required=False,default=None,help="V1 depth data in 'GeneID\t[...]\t0;3;5;...;8' format.")
+
+    options2 = p.add_argument_group('Input option 2')
+    options2.add_argument("-a","--annotation",dest="annofile",type=str,metavar="sacCer2_SGDother.bed/gpd", required=False,default=None,help="Gene annotation file in Bed (.bed) or GenePred (.gpd) format. Program will determine the file format by file extension. See UCSC gene format for details.")
+    options2.add_argument("-g","--genome",dest="gfile",type=str,metavar="sacCer2.fa/2bit",required=False,default=None,help="Genome file in Fasta or 2bit format.")
+    options2.add_argument("-dS","--Sdepth",dest="dS",type=str,metavar="S1.wig/bw",required=False,default=None,help="Wiggle file or bigwig file containing loop (S) information. When wiggle file is provided, a genome size should be provided as genome_prefix.sizes.")
+    options2.add_argument("-dV","--Vdepth",dest="dV",type=str,metavar="V1.wig/bw",required=False,default=None,help="Wiggle file or bigwig file containing stem (V) information. When wiggle file is provided, a genome size should be provided as genome_prefix.sizes.")
+
+    # general parameters
+    paras = p.add_argument_group('Parameters')
+    paras.add_argument("-c","--coverage",dest="depth",type = int,metavar="5",required=False,default=5,help="Minimum coverage depth. For data has either stem or loop data, depth = 2 * num_of_reads / RNA_length. For data has both stem and loop, depth = (stems+loops) / RNA_length. [default = 5]")
+    paras.add_argument("-t","--ntrim",dest="ntrim",type=int,metavar="5",required=False,default=5,help="Number of bases trimmed at both ends. [default = 5]")
+    paras.add_argument("-l","--length",dest="length",type=int,metavar="3000",required=False,default=3000,help="Maximum seqeuence length. Longer sequences will not included in output files. Set '0' if no limitation. [default = 300]")
+    paras.add_argument("-n","--normalize",dest="norm",action="store_true",required=False,help="If specified, loops and stems are normalized to equal depth globally. Otherwise, keep original values.")
+    # paras.add_argument("-c","--constraints",dest="constratints",action="store_true",default=True,help="Calculate constraints.")
+   
+    # Output
+    output = p.add_argument_group('Output')
+
+    output.add_argument("-o","--output",dest="outfile",type=str,metavar="sacCer2.fd",required=False,default="stdout",help="Output file. Default is stdout.")
+    par_dict['FastD']['generate'] = {None:p}
+
+
+    # FastD merge
+    p = argparse.ArgumentParser(prog='rsq FastD merge',description="Program: %(prog)s (Merge FastD files.)",epilog='dependency rsq')
+    options = p.add_argument_group('Input options')
+    options.add_argument("-i","--infiles",dest="infiles",type=str,metavar="sample.fd",nargs='+',required=True,help="A list of FastD files.")
+    options.add_argument("-w","--weights",dest="weights",type=float,metavar="0.5",nargs='+',required=True,help="A list of weights for FastD files. Weight ranges in [0,1].")
+
+    # Output
+    output = p.add_argument_group('Output')
+    output.add_argument("-o","--output",dest="outfile",type=str,metavar="merged.fd",required=False,default="stdout",help="Output file. FastD files are merged by weights.")
+    par_dict['FastD']['merge'] = {None:p}
+
+    
+    ##################################################
+    # FastC
+    ##################################################
+    
+    P = argparse.ArgumentParser(prog='rsq FastC',usage=argparse.SUPPRESS,description="Program: %(prog)s (Generating FastC format data.)",epilog='dependency rsq,ngslib')
+    
+    options =  P.add_argument_group('Sub commands')
+    options.add_argument('generate', help='Generating FastC file from Next-Generation sequencing data.')
+    options.add_argument('merge', help='Merge FastC files.')
+    par_dict['FastC'] = {None:P}
+
+    # FastC generate
+    p = argparse.ArgumentParser(prog='rsq FastC generate',description="Program: %(prog)s (Generating FastC format data.)",epilog='dependency rsq')
+
+    options = p.add_argument_group('Input options')
+    options.add_argument("-i",dest="infile",type=str,metavar="sce_genes.fd", required=True,help="Gene sequence in FastD format.")
+    options.add_argument("-m", "--method",dest="method",type=str,choices=['p','f','l','e','n'],default='fisher',help="Methods to convert FastD data to FastC format. 'p' for 'percentile', 'f' for 'fisher exact test', 'l' for 'log(S+1)/(V+1)','e' for 'exclusive' and 'n' for 'none'.")
+    options.add_argument("-st","--sthreshold",dest="sthreshold",type=float,metavar=0.05,required=False,default=0.05,help="Threshold for S1 (loops) data.")
+    options.add_argument("-vt","--vthreshold",dest="vthreshold",type=float,metavar=0.05,required=False,default=0.05,help="Threshold for V1 (stems) data.")
+   
+    # Output
+    output = p.add_argument_group('Output')
+
+    output.add_argument("-o","--output",dest="outfile",type=str,metavar="sacCer2.fc",required=False,default="stdout",help="Output file. Default is stdout.")
+    par_dict['FastC']['generate'] = {None:p}
+
+
+    # FastC merge
+    p = argparse.ArgumentParser(prog='rsq FastC merge',description="Program: %(prog)s (Merge FastC files.)",epilog='dependency rsq')
+    options = p.add_argument_group('Input options')
+    options.add_argument("-i","--infiles",dest="infiles",type=str,metavar="sample.fc",nargs='+',required=True,help="A list of FastC files.")
+    options.add_argument("-m","--method",dest="method",type=str,choices=['i','u'],default='i',help="Method used to merge constraints.'i' for interstion and 'u' for union.")
+
+    # Output
+    output = p.add_argument_group('Output')
+    output.add_argument("-o","--output",dest="outfile",type=str,metavar="merged.fc",required=False,default="stdout",help="Output file. Common constraints are shown in the output file.")
+    par_dict['FastC']['merge'] = {None:p}
+
+
+    ##################################################
+    # Fold
+    ##################################################
+    
+    
+    p = argparse.ArgumentParser(prog='rsq fold',description="Program: %(prog)s (Fold RNA structures given FastC constraints.)",epilog='dependency rsq,ngslib')
+
+    options = p.add_argument_group('Input options')
+    options.add_argument("-i","--infile",dest="infile",type=str,metavar="sce_genes.fc", required=True,help="Constraints in FastC format.")
+    #options.add_argument("-m", "--methods",dest="methods",type=str,nargs="+",choices=['sfold','RNAfold','mfold'],default='sfold ',help="Methods to fold RNA structures.")
+    options.add_argument("-p","--processors",dest="p",type=int,metavar=10,required=False,default=10,help="Number of processors to run. [Default = 10].")
+    options.add_argument("-n","--nstructures",dest="n",type=int,metavar=1000,required=False,default=1000,help="Number of structures sampled by sfold. [Default = 1000].")
+   
+    # Output
+    output = p.add_argument_group('Output')
+    output.add_argument("-w","--workdir",dest="wdir",type=str,metavar="./workdir",required=False,default="./workdir",help="Directory for sfold temporary files. [Default is './workdir']")
+    output.add_argument("-k","--keep",dest="keep",action="store_true",required=False,default=False,help="Keep the temporary files if specified.")
+    output.add_argument("-o","--outfile",dest="outfile",type=str,metavar="out.fs",default="stdout",required=False,help="Sfold output file. Default is standard output.")
+
+    par_dict['fold'] = {None:p}
+
+
+    ##################################################
+    # FastS
+    ##################################################
+
+    P = argparse.ArgumentParser(prog='rsq FastS',usage=argparse.SUPPRESS,description="Program: %(prog)s (FastS file manipulation.)",epilog='dependency rsq')
+    
+    options =  P.add_argument_group('Sub commands')
+    #options.add_argument('extend', help='Extend FastS format to EFastS format using gene annotation information.')
+    options.add_argument('merge', help='Merge FastS files.')
+    par_dict['FastS'] = {None:P}
+
+
+    # Merge FastS files
+    p = argparse.ArgumentParser(prog='rsq FastS merge',description="Program: %(prog)s (Merge FastS files.)",epilog='dependency rsq')
+
+    options = p.add_argument_group('Input options')
+    options.add_argument("-i","--infiles",dest="infiles",type=str,metavar="sample.fs", nargs="+",required=True,help="FastS files.")
+    #options.add_argument("-c","--clustering",dest='clust',action='store_true',default=False,help="Do clustering and use the centroids as candidate structures. No clustering if not specified..")
+
+    options = p.add_argument_group('Output options')
+    options.add_argument("-o","--outfile",dest="outfile",type=str,metavar="merged.fs", default="stdout", required=False,help="Merged FastS file.")
+
+    par_dict['FastS']['merge'] = {None:p}
+
+    ##################################################
+    # isoform
+    ##################################################
+
+    P = argparse.ArgumentParser(prog='rsq isoform',description="Program: %(prog)s (Deal with isoform cases.)",epilog='dependency rsq,ngslib')
+    options =  P.add_argument_group('Sub commands')
+    options.add_argument('extend', help='Extend FastD and FastS formats.')
+    options.add_argument('split',help="Split EfastD/S formats back into FastD/S formats.")
+    par_dict['isoform'] = {None:P}
+
+    p = argparse.ArgumentParser(prog='rsq isoform extend',description="Program: %(prog)s (Extend FastD and FastS formats to EFastD and EFastS formats using gene annotation information.)",epilog='dependency rsq,ngslib')
+
+    # Extend FastD/S format
+    options = p.add_argument_group('Input options')
+    options.add_argument("-d","--fdfile",dest="fdfile",type=str,metavar="sce_genes.fd", required=True,help="FastD file.")
+    options.add_argument("-s","--fsfile",dest="fsfile",type=str,metavar="sce_genes.fs", required=True,help="FastS file.")
+    options.add_argument("-g","--geneanno",dest="ganno",type=str,metavar="sce_genes.gpd", required=True,help="Gene annotation file in GenePred format.")
+
+    options = p.add_argument_group('Output options')
+    options.add_argument("-p","--prefix",dest="prefix",type=str,metavar="sce_gene", required=False,help="Prefix of output files. prefix.efd/efs are the extended FastD/S file. prefix.isf is the isoform information.")
+
+    par_dict['isoform']['extend'] = {None:p}
+
+    p = argparse.ArgumentParser(prog='rsq isoform split',description="Program: %(prog)s (Split EFastD and EFastS formats to FastD and FastS formats.)",epilog='dependency rsq,ngslib')
+
+    # Extend FastD/S format
+    options = p.add_argument_group('Input options')
+    options.add_argument("-i","--isffile",dest="isffile",type=str,metavar="sce_genes.isf", required=True,help="isoform file.")
+    options.add_argument("-s","--efsfile",dest="efsfile",type=str,metavar="sce_genes.efs", default=None,required=False,help="FastS file.")
+    options.add_argument("-d","--efdfile",dest="efdfile",type=str,metavar="sce_genes.efd", required=True,help="FastD file.")
+
+    options = p.add_argument_group('Output options')
+    options.add_argument("-p","--prefix",dest="prefix",type=str,metavar="sce_gene", required=False,help="Prefix of output files. By default is the prefix of the FastS file.")
+
+    par_dict['isoform']['split'] = {None:p}
+
+
+    ##################################################
+    # quantify
+    ##################################################
+
+    p = argparse.ArgumentParser(prog='rsq quantify',description="Program: %(prog)s (Quantify RNA structures given RNA footprinting data in FastD format.)",epilog='dependency rsq,ngslib')
+
+    options = p.add_argument_group('Input options')
+    options.add_argument("-d","--fdfile",dest="fdfile",type=str,metavar="sce_genes.fd", required=True,help="RNA footprinting data in FastD format.")
+    options.add_argument("-s","--fsfile",dest="fsfile",type=str,metavar="sce_genes.fs", required=True,help="RNA structure in FastS format.")
+    options.add_argument("-i","--isoform",dest="isoform",type=str,metavar="sce_genes.isf",required=False,default=None,help="Transcript isoform information. Required only when isoforms are considered.")
+    options.add_argument("-e","--expression",dest="expression",type=str,metavar='sce_genes.eprs',required=False,default=None,help='Expression levels from gene expression data. Effective only in isoform case. Format for each line: geneid\\isoform1\\tRPKM\\tisoform2\\tRPKM\\t...')
+    options.add_argument("-m", "--maxiter",dest="maxiter",type=int,metavar="100",required=False,default=100,help="Maximum number of iteration for EM algorithm. Default is 100.")
+    options.add_argument("-t","--threshold",dest="threshold",type=float,metavar="1e-6",required=False,default=1e-6,help="Threshold for EM algorithm termination.")
+   
+    # Output
+    output = p.add_argument_group('Output')
+    output.add_argument("-o","--outfile",dest="outfile",type=str,metavar="out.txt",default="stdout",required=False,help="Quantification output file.")
+
+    par_dict['quantify'] = {None:p}
+
+
+    ##################################################
+    # fitness
+    ##################################################
+    
+    
+    p = argparse.ArgumentParser(prog='rsq fitness',description="Program: %(prog)s (Fold RNA structures given sequencing depth and constraints.)",epilog='dependency rsq,ngslib')
+
+    options = p.add_argument_group('Input options')
+    options.add_argument("-d","--FastD",dest="fdfile",type=str,metavar="sce_genes.fd", required=True,help="Gene sequence in FastD format.")
+    options.add_argument("-s","--fsfile",dest="fsfile",type=str,metavar="sce_genes.fs", required=True,help="Structures in FastS format.")
+    options.add_argument("-c","--coverage",dest="coverage",type=float,metavar=5,required=False,default=5,help="Minimum FastD coverage. [default = 5].  For data with either stem or loop reads, coverage = 2. * sum(depth) / RNA_length. For data with both stem and loop reads, coverage = sum(depth) / RNA_length.")
+    options.add_argument("-t","--threshold",dest="threshold",type=float,metavar=0.1,required=False,default=0,help="Percentage threshold.Only structures with percentage > threshold are considered.Set to 0 when all the structures are wanted irrespective of the scores.")
+    options.add_argument("-b","--byseq",dest="byseq",action="store_true",default=False,required=False,help="If set, find common items between FastD and FastS by gene sequences instead of gene names.")
+   
+    # Output
+    output = p.add_argument_group('Output')
+    output.add_argument("-o", "--outfile",dest="outfile",type=str,metavar='outfile',default="stdout",required=False,help="Output file name.")
+    par_dict['fitness'] = {None:p}
+
+
+    ##################################################
+    # draw
+    ##################################################
+    # Draw RNA secondary structures.
+    p = argparse.ArgumentParser(prog='rsq draw',description="Program: %(prog)s (Draw RNA secondary structures.)",epilog='dependency rsq')
+
+    options = p.add_argument_group('Input options')
+    options.add_argument("-i","--infile",dest="infile",type=str,metavar="sce_genes.fs", required=True,help="RNA structure in FastS format.")
+    options.add_argument("-f","--format",dest="format",type=str,metavar="ps",default="ps",choices=['svg','ps'],help="Secondary structure file format. Default is ps format.")
+   
+    # Output
+    output = p.add_argument_group('Output')
+    output.add_argument("-s","--suffix",dest="suffix",type=str,metavar="suffix",required=False,default=None,help="suffix of output file name in 'genename_suffix-i.format'. Default is no suffix.")
+
+    par_dict['draw'] = {None:p}
+
+    
+    #Parse arglst
+    nl = len(arglst)
+    
+    P = par_dict
+    i = 1
+    while True:
+        if i == nl:
+            sys.exit(P[None].print_help())
+        if P.has_key(arglst[i]):
+            P = P[arglst[i]]
+            i += 1
+        else:
+            try:
+                args = P[None].parse_args(arglst[i:])
+            except:
+                sys.exit(P[None].print_help())
+            return arglst[1:i],args
+    assert True, "Not reach this line."
+    return
+
+def fastDGenerate(args):
+    '''
+    Generate FastD file. NOTE: Transcripts with duplicate names are ignored.
+    Input option 1:
+        args.fafile: string, *.fa
+            Gene sequence in Fasta format.
+        args.S: string, *S1.tab
+            S1 depth data in 'GeneID [...] 0;3;5;...;8' format.
+        args.V: string, *V1.tab
+            V1 depth data in 'GeneID [...] 0;3;5;...;8' format.
+    
+    Input option 2:
+        args.annofile: string, *.bed or *.genepred
+            Gene annotation file in Bed or GenePred format. See UCSC gene format for details.
+        args.gfile: string, *.fa
+            Genome file in Fasta format.
+        args.dS: string, *.wig or *.bw
+            Wiggle file or bigwig file containing loop (S) information.
+        args.dV: string, *.wig or *.bw
+            Wiggle file or bigwig file containing stem (V) information.
+    
+    Parameters:
+        args.ntrim: int
+            Number of bases trimmed at both ends. [default= 5]
+        args.length: int
+            Maximum seqeuence length. Longer sequences will notincluded in output files. Set '0' if no limitation. [default= 3000]
+        args.norm: bool
+            If specified, loops and stems are normalized to equal depth globally. Otherwise, keep original values.
+    
+    Output:
+        args.outfile: string
+            Output file. Default is stdout.
+    '''
+    # Input option 1
+    if args.fafile is not None and not (args.S is None and args.V is None):
+        # read S file
+        if args.S is not None:
+            duplicate = collections.OrderedDict()
+            print >> sys.stderr, "Reading S1 data: {0}".format(args.S)
+            S = collections.OrderedDict()
+            i0 = 0
+            for line in ngslib.mFile(args.S):
+                i0 += 1
+                if i0%1000 == 0:
+                    print >> sys.stderr, "Processed {0} items.      \r".format(i0),
+                lines = line.split()
+                s = lines[0]
+                d = lines[-1]
+                if not S.has_key(s):
+                    S[s] = numpy.array([float(i) for i in d.split(";")])
+                    if args.ntrim:
+                        S[s][:args.ntrim] = 0.
+                        S[s][-args.ntrim:] = 0.
+                else:
+                    duplicate[s] = 1
+            for key in duplicate:
+                S.pop(key)
+            print >> sys.stderr, "Processed {0} items.      ".format(i0)
+            if len(duplicate):
+                print >> sys.stderr, "Ignore {0} duplicate items.".format(len(duplicate))
+            print >> sys.stderr
+        # read V file
+        if args.V is not None:
+            duplicate = collections.OrderedDict()
+            print >> sys.stderr, "Reading V1 data: {0}".format(args.V)
+            V = collections.OrderedDict()
+            i0 = 0
+            for line in ngslib.mFile(args.V):
+                i0 += 1
+                if i0%1000 == 0:
+                        print >> sys.stderr, "Processed {0} items.      \r".format(i0),
+                lines = line.split()
+                v = lines[0]
+                d = lines[-1]
+                if not V.has_key(v):
+                    V[v] = numpy.array([float(i) for i in d.split(";")])
+                    if args.ntrim:
+                        V[v][:args.ntrim] = 0.
+                        V[v][-args.ntrim:] = 0.
+                else:
+                    duplicate[v] = 1
+            for key in duplicate:
+                V.pop(key)
+            print >> sys.stderr, "Processed {0} items.      ".format(i0)
+            if len(duplicate):
+                print >> sys.stderr, "Ignore {0} duplicate items.".format(len(duplicate))
+            print >> sys.stderr
+        
+        # Normalization is not required if one of the data is missing.
+        if args.V is None or args.S is None:
+            args.norm = False
+            print >> sys.stderr, "Either loop or stem data is not provided. Normalization is not required."
+        # read fasta file and print output
+        if args.norm:
+            print >> sys.stderr, "Reading Fasta file: {0} and calculate normalization ratio ...".format(args.fafile)
+            pars = []
+            sumS = 0.
+            sumV = 0.
+            i0 = 0
+            for fa in ngslib.IO.BioReader(args.fafile,'fasta'):
+                i0 += 1
+                if i0%1000 == 0:
+                    print >> sys.stderr, "Processed {0} items.      \r".format(i0),
+                # Parse data
+                l = len(fa)
+                if (args.length == 0 or l < args.length) and (S.has_key(fa.id) or V.has_key(fa.id)):
+                    tfd = rsq.FastD(fa.id,str(fa.seq),S[fa.id] if S.has_key(fa.id) else numpy.zeros(l),V[fa.id] if V.has_key(fa.id) else numpy.zeros(l))
+                    if len(fa.seq) == tfd.loops.size == tfd.stems.size:
+                        pars.append(tfd)
+                    else:
+                        print >> sys.stderr, "Warning: {0} has different length between RNA sequence and sequencing data. Skip it.".format(fa.id)
+                    pars.append(rsq.FastD(fa.id,str(fa.seq),S[fa.id] if S.has_key(fa.id) else numpy.zeros(l),V[fa.id] if V.has_key(fa.id) else numpy.zeros(l)))
+                    if S.has_key(fa.id) and V.has_key(fa.id):
+                        sumS += sum(S[fa.id])
+                        sumV += sum(V[fa.id])
+            print >> sys.stderr, "Processed {0} items.      \n".format(i0)
+            # Normalization
+            sk = (sumS + sumV)/2.0/sumS
+            vk = (sumS + sumV)/2.0/sumV
+            print >> sys.stderr, "Normalization ratio: S = %-3.2f, V = %-3.2f\n" % (sk, vk)
+            # print FastD data
+            with ngslib.mFile(args.outfile,'w') as ofh:
+                print >> sys.stderr, "Writing FastD output into {0}".format(args.outfile)
+                i1 = 0
+                for fd in pars:
+                    fd.loops *= sk
+                    fd.stems *= vk
+                    if numpy.sum(fd.loops+fd.stems)/len(fd) >= args.depth:
+                        i1 += 1
+                        print >> ofh, fd
+            print >> sys.stderr, "Written {0} FastD into {1}".format(i1,args.outfile)
+        else: # No normalization
+            print >>sys.stderr, "Reading Fasta sequences from {0} and writing output into {1} ...".format(args.fafile,args.outfile)
+            with ngslib.mFile(args.outfile,'w') as ofh:
+                i0 = 0
+                i1 = 0
+                for fa in ngslib.IO.BioReader(args.fafile,'fasta'):
+                    i0 += 1
+                    if i0%1000 == 0:
+                        print >> sys.stderr, "Processed {0} items.      \r".format(i0),
+                    l = len(fa)
+                    slen = max(len(S.get(fa.id,[])),len(V.get(fa.id,[])))
+                    if slen>0 and l != slen:
+                        print >> sys.stderr, "Warning: {0} has different length between RNA sequence and sequencing data. Skip it.".format(fa.id) 
+                        continue
+                    if (args.length == 0 or l < args.length):
+                        depth = (numpy.sum(S.get(fa.id,0.) + V.get(fa.id,0.)))/l
+                        if not S.has_key(fa.id) or not V.has_key(fa.id): 
+                            depth *= 2.
+                        if depth>=args.depth:
+                            i1 += 1
+                            print >> ofh, rsq.FastD(fa.id,str(fa.seq),S.get(fa.id,None),V.get(fa.id,None))
+                print >> sys.stderr, "Processed {0} items.      \n".format(i0)
+                print >> sys.stderr, "Written {0} FastD into {1}".format(i1,args.outfile)
+
+    # Input option 2
+    elif args.annofile is not None and args.gfile is not None and not (args.dS is None and args.dV is None):
+        gfh = ngslib.DB(args.gfile,'guess')
+        chrom_sizes = args.gfile+'.sizes'
+        if (args.dS and args.dS.endswith('.wig')) or (args.dV and args.dV.endswith('.wig')): 
+            if not os.path.isfile(chrom_sizes):
+                with open(chrom_sizes,'w') as ofh:
+                    for chrom, size in zip(*gfh.chromSizes()):
+                        print >>ofh, "{0}\t{1}".format(chrom,size)
+        dSfh = ngslib.DB(args.dS,'guess',chrom_size=chrom_sizes) if args.dS is not None else None
+        dVfh = ngslib.DB(args.dV,'guess',chrom_size=chrom_sizes) if args.dV is not None else None
+        pars = collections.OrderedDict()
+        duplicate = collections.OrderedDict()
+        sumS = 0
+        sumV = 0
+        i0 = 0
+        print >> sys.stderr, "Reading data:"
+        print >> sys.stderr, "  annotation file: {0}".format(args.annofile)
+        if args.dS is not None:
+            print >> sys.stderr, "  S1 data: {0}".format(args.dS)
+        if args.dV is not None:
+            print >> sys.stderr, "  V1 data: {0}".format(args.dV)
+        if args.dS is None or args.dV is None:
+            args.norm = False
+        il = 0
+        ic = 0
+        for item in ngslib.IO.BioReader(args.annofile,'guess'):
+            if pars.has_key(item.id):
+                duplicate[item.id] = 1
+                continue
+            seq = item.getSeq(gfh)
+            l = len(seq)
+            i0 +=1
+            if i0%1000 == 0:
+                print >> sys.stderr, "Processed {0} items.       \r".format(i0),
+            if args.length == 0 or l < args.length:
+                il += 1
+                loops = item.getWig(dSfh,'pileup',True) if dSfh is not None else numpy.zeros(l)
+                stems = item.getWig(dVfh,'pileup',True) if dVfh is not None else numpy.zeros(l)
+                if args.ntrim:
+                    loops[:args.ntrim] = 0.
+                    loops[-args.ntrim:] = 0.
+                    stems[:args.ntrim] = 0.
+                    stems[-args.ntrim:] = 0.
+                sumloops = numpy.sum(loops)
+                sumstems = numpy.sum(stems)
+                if args.norm:
+                    sumS += sumloops
+                    sumV += sumstems
+                if sumloops  > 0 or sumstems > 0:
+                    ic += 1
+                    pars[item.id]=rsq.FastD(item.id,str(seq),loops,stems)
+        # Remove duplicate
+        for key in duplicate:
+            pars.pop(key,None)
+        print >> sys.stderr, "Processed {0} items.       \n".format(i0)
+        print >> sys.stderr, "{0} items were ignored due to duplicate gene names.".format(len(duplicate))
+        print >> sys.stderr, "{0} items passed length (<={1}) filter".format(il,args.length if args.length>0 else "Inf")
+        print >> sys.stderr, "Then {0} items were removed for no reads were detected.".format(il-ic)
+        print >> sys.stderr
+        if args.norm:
+            sk = (sumS + sumV)/2.0/sumS
+            vk = (sumS + sumV)/2.0/sumV
+            print >> sys.stderr, "Normalization ratio: S = %-3.2f, V = %-3.2f\n" % (sk, vk)
+        print >> sys.stderr, "Writing FastD data into {0}".format(args.outfile)
+        i0 = 0
+        if dSfh and dVfh:
+            mode = 'b'
+        elif dSfh:
+            mode = 'l'
+        else:
+            mode = 's'
+        with ngslib.mFile(args.outfile, 'w') as ofh:
+            for item in pars.values():
+                if args.norm:
+                    item.loops *= sk
+                    item.stems *= vk
+                if item.depth(mode) >= args.depth:
+                    i0 += 1
+                    print >> ofh, item
+        gfh.close()
+        print >> sys.stderr, "{0} items passed coverage (>={1}) filter".format(i0,args.depth)
+        print >> sys.stderr, "Finally {0} items were written into {1}".format(i0,args.outfile)
+        if dSfh is not None: dSfh.close()
+        if dVfh is not None: dVfh.close()
+    else:
+        print >> sys.stderr, "ERROR: Neither Input option 1 nor 2 is satisfied."
+    # end of function
+
+def fastDMerge(args):
+    '''
+    Merge FastD files.
+    Parameters:
+        args.infiles: list of strings
+            A list of FastD files
+        args.weights: list of floats
+            Weight for each FastD file
+        args.outfile: string
+            Output file.
+    '''
+    if len(args.infiles) != len(args.weights):
+        raise ValueError("ERROR: number of files and weights do not match.")
+    FD = collections.OrderedDict()
+    for i in range(len(args.infiles)):
+        weight = args.weights[i]
+        for fd in rsq.IO.FastDReader(args.infiles[i]):
+            if FD.has_key(fd.name):
+                FD[fd.name].stems += fd.stems*weight
+                FD[fd.name].loops += fd.loops*weight
+            else:
+                fd.loops *= weight
+                fd.stems *= weight
+                FD[fd.name] = fd
+    # output
+    with ngslib.mFile(args.outfile, 'w') as ofh:
+        for name in FD:
+            print >>ofh, FD[name]
+
+def fastCGenerate(args):
+    '''
+    Calculate constraints using different methods from FastD file.
+    '''
+    with ngslib.mFile(args.outfile,'w') as ofh:
+        i0 = 0
+        print >> sys.stderr, "Start: reading items from {0} and writing output into {1} ...".format(args.infile,args.outfile)
+        for fd in rsq.IO.FastDReader(args.infile):
+            i0 += 1
+            if i0%100 == 0:
+                print >> sys.stderr, "Processed {0} items ...        \r".format(i0),
+            ofh.write(str(fd.toFastC(args.method,args.sthreshold,args.vthreshold))+"\n")
+        print >> sys.stderr, "Processed {0} items.\n".format(i0)
+        print >> sys.stderr, "Done.\n"
+    return
+
+def fastCMerge(args):
+    '''
+    Merge FastC files.
+    Parameters:
+        args.infiles: list of strings
+            A list of FastC files
+        args.method: 'u' or 'i'
+            'u' or union, and 'i' for 'intersection.
+        args.outfile: string
+            Output file.
+    Output:
+        Merged FastC file.
+    Example:
+        constraint 1: '..||..xx..'
+        constraint 2: '.x|.x.|x..'
+        union:      : '.x||x..x..' conflicting ones are set to '.'
+        intersection: '..|....x..' only take common ones.
+    '''
+    FC = collections.OrderedDict()
+    for i in range(len(args.infiles)):
+        for fc in rsq.IO.FastCReader(args.infiles[i]):
+            if FC.has_key(fc.name):
+                if args.method == 'i': # intersection
+                    idx = FC[fc.name].constraints != numpy.array(list(fc.constraints))
+                    FC[fc.name].constraints[idx] = '.'
+                else: # union
+                    FC[fc.name].constraints = numpy.array([const_dict[a][b] for a,b in zip(FC[fc.name].constraints,fc.constraints)])
+            else:
+                fc.constraints = numpy.array(list(fc.constraints))
+                FC[fc.name] = fc
+    # output
+    with ngslib.mFile(args.outfile, 'w') as ofh:
+        for name in FC:
+            FC[name].constraints = FC[name].constraints.tostring()
+            print >>ofh, FC[name]
+
+def isoformExtend(args):
+    '''
+    Extend FastD and FastS for genes with isoforms.
+    Parameters:
+        args.fdfile: string
+            FastD file.
+        args.fsfile: stirng
+            FastS file
+        args.ganno: string
+            Gene annotation file in GenePred format.
+        args.prefix: string
+            Output prefix. By default use the prefix of FastD file
+    '''
+    # Read FastS file
+    FSS = collections.OrderedDict()
+    for fs in rsq.IO.FastSReader(args.fsfile):
+        FSS[fs.name] = fs
+        
+    # Read FastD file
+    FDS = collections.OrderedDict()
+    for fd in rsq.IO.FastDReader(args.fdfile):
+        if FSS.has_key(fd.name): # only count those transcript with structures
+            FDS[fd.name] = fd     
+
+    # Read GenePred annotation file.
+    Isoforms = collections.OrderedDict() # {proteinid:[FastS,FastS,...]}
+    Transcripts = collections.OrderedDict() # {transcript.id:transcript}
+    for transcript in ngslib.IO.BioReader(args.ganno,'genepred'):
+        if FSS.has_key(transcript.id) and transcript.proteinid != '': # only count transcript in FSS
+            Isoforms.setdefault(transcript.proteinid,[])
+            Isoforms[transcript.proteinid].append(FSS.pop(transcript.id)) # FastS
+            Transcripts[transcript.id] = transcript # annotation
+    # FastS file
+    with ngslib.mFile(args.prefix+".efs", 'w') as ofh:
+        with ngslib.mFile(args.prefix+".efd",'w') as fdfh:
+            with ngslib.mFile(args.prefix+".isf",'w') as isffh:
+                # transcripts have no protein id
+                for key in FSS:
+                    print >>ofh, FSS[key]
+                    print >>fdfh, FDS[key]
+                # transcripts have protein id
+                for pid in Isoforms:
+                    if len(Isoforms[pid]) == 1: # no isoform
+                        print >>ofh, fs
+                        print >>fdfs, FDS[fs.name]
+                    else:
+                        # Read exons
+                        exons = ngslib.BedList()
+                        mexons = ngslib.BedList()
+                        for fs in Isoforms[pid]:
+                            exons.extend(Transcripts[fs.name].exons())
+                        exons.sort()
+                        # Merge exons
+                        starts = []
+                        lengths = [0]
+                        mexons.append(exons[0])
+                        for exon in exons[1:]:
+                            if exon.overlapLength(mexons[-1])>=0:
+                                mexons[-1] += exon
+                            else:
+                                starts.append(mexons[-1].start)
+                                lengths.append(len(mexons[-1])+lengths[-1])
+                                mexons.append(exon)
+                        starts.append(mexons[-1].start)
+                        lengths.append(len(mexons[-1])+lengths[-1])
+                        # Parse FastS, FastD
+                        L = lengths[-1]
+                        Sdepth = numpy.zeros(L)
+                        Vdepth = numpy.zeros(L)
+                        all_structures = []
+                        all_scores = []
+                        seq = numpy.repeat('N',L)
+                        strand = Transcripts[Isoforms[pid][0].name].strand
+                        lstr = pid
+                        for fs in Isoforms[pid]:
+                            fd = FDS[fs.name]
+                            M = len(fs.scores)
+                            lstr += "\t"+fs.name+":"+str(M)
+                            transcript = Transcripts[fs.name]
+                            structures = [numpy.repeat('-',L) for i in range(M)]
+                            if strand == '-':
+                                fs.rc()
+                                fd.rc()
+                            l = 0
+                            # string to list
+                            fs.seq = list(fs.seq)
+                            fs.structures = [list(st) for st in fs.structures]
+                            for estart,estop in zip(transcript.exonstarts,transcript.exonstops):
+        
+                                # Find overlapped exon
+                                le = estop-estart
+                                idx = bisect.bisect(starts,estart)
+                                #if exon.start < starts[idx]:
+                                idx -=1
+                                start = lengths[idx]+ estart-starts[idx]
+                                seq[start:(start+le)] = fs.seq[l:(l+le)]
+                                Sdepth[start:(start+le)] = fd.loops[l:(l+le)]
+                                Vdepth[start:(start+le)] = fd.stems[l:(l+le)]
+                                for i in range(M):
+                                    structures[i][start:(start+le)] = fs.structures[i][l:(l+le)]
+                                l += le
+                            all_structures.extend(structures)
+                            all_scores.extend(fs.scores)
+                        # print EFastS
+                        nfs = rsq.FastS(pid,seq.tostring(),[st.tostring() for st in all_structures],all_scores)
+                        if strand == '-':
+                            nfs.rc()
+                            Sdepth = Sdepth[::-1]
+                            Vdepth = Vdepth[::-1]
+                        print >> ofh, nfs
+                        print >> fdfh, rsq.FastD(nfs.name,nfs.seq,Sdepth,Vdepth)
+                        print >> isffh, lstr
+
+def isoformSplit(args):
+    '''
+    Split EFastD/S into FastD/S.
+    Parameters:
+        args.isffile: string
+            Isoform information, generated from 'isoform extend'
+        args.efsfile: string
+            Extened FastS file. generated from 'isoform extend'
+        args.efdfile: string
+            Extened Fastd file. generated from 'isoform extend'
+        args.prefix: string
+            Output prefix. Default is the prefix of args.efsfile.
+    '''
+    isf = collections.OrderedDict()
+    for line in ngslib.mFile(args.isffile):
+        items = line.split()
+        isf[items[0]] = []
+        for item in items[1:]:
+            tid,nst = item.split(":")
+            nst = int(nst)
+            isf[items[0]].append((tid,nst))
+    FDS = collections.OrderedDict()
+    if args.efdfile:
+        for efd in rsq.IO.FastDReader(args.efdfile):
+            FDS[efd.name] = efd
+        fdfh = ngslib.mFile(args.prefix+".fd",'w')
+    with ngslib.mFile(args.prefix+".fs",'w') as fsfh:
+        for efs in rsq.IO.FastSReader(args.efsfile):
+            seq = numpy.array(list(efs.seq))
+            cnt = 0
+            for tid,nst in isf[efs.name]:
+                sts,efs.structures = efs.structures[:nst],efs.structures[nst:]
+                scs,efs.scores = efs.scores[:nst],efs.scores[nst:]
+                idx = numpy.array(list(sts[0])) != '-'
+                tseq = seq[idx].tostring()
+                for i in range(nst):
+                    sts[i] = sts[i].replace('-','')
+                print >>fsfh, rsq.FastS(tid,tseq,sts,scs)
+                if args.efdfile:
+                    print >>fdfh, rsq.FastD(tid,tseq,FDS[efs.name].loops[idx],FDS[efs.name].stems[idx])
+    if args.efdfile:
+        fdfh.close()
+
+def fastSMerge(args):
+    '''
+    Merge FastS files.
+    Parameters:
+        args.infiles: list of strings
+            A list of FastC files
+        args.outfile: string
+            Output file.
+    '''
+    FS = collections.OrderedDict()
+    for i in range(len(args.infiles)):
+        for fs in rsq.IO.FastSReader(args.infiles[i]):
+            if FS.has_key(fs.name):
+                FS[fs.name].structures.extend(fs.structures)
+                FS[fs.name].scores.extend(fs.scores)
+            else:
+                FS[fs.name] = fs
+    # output
+    with ngslib.mFile(args.outfile, 'w') as ofh:
+        for name in FS:
+            print >>ofh, FS[name]
+
+def init(args):
+    ''' store the counter for later use '''
+    global counter
+    counter = args
+
+def sfoldext(fc,N,fn,wdir,keep):
+    ''' write sfold result to file. '''
+    success = True
+    try:
+        fs = rsq.Predictor.sfoldext(fc,37,0,N=N,workdir=wdir,keep=keep)
+        global lock
+        with lock:
+            with ngslib.mFile(fn,'aw') as ofh:
+                ofh.write("{0}\n".format(fs))
+                #ofh.flush()
+    except IOError as e:
+        print >> sys.stderr, "\r{0}".format(e)
+        success = False
+    global counter
+    counter.value += 1
+    if counter.value % 2 == 0:
+        print >> sys.stderr, "Processed {0} items ...      \r".format(counter.value),
+    return success
+
+def parseFold(args):
+    '''
+    Fold structures using sfold given FastC.
+    '''
+    print >> sys.stderr, "Start to fold with {0} CPUs ...".format(args.p)
+    # multiprocess
+    freeze_support()
+    global counter
+    counter = Value('i', 0)
+    global lock
+    lock = Lock()
+    # check working directory
+    args.wdir = os.path.expanduser(args.wdir)
+    if not os.path.isdir(args.wdir):
+        os.makedirs(args.wdir)
+
+    # create empty file
+    with ngslib.mFile(args.outfile,'w') as ofh:
+        pass
+    FCS = list(rsq.IO.FastCReader(args.infile))
+    pool = Pool(processes=args.p,initializer = init, initargs = (counter,))
+    pool.map(functools.partial(sfoldext,N=args.n,fn=args.outfile,wdir=args.wdir,keep=args.keep), FCS)
+    print >> sys.stderr, "Processed {0} items.      ".format(counter.value)
+    if not args.keep:
+        shutil.rmtree(args.wdir, ignore_errors=True)
+    return
+
+def quantify(args):
+    '''
+    Quantification of RNA structure dynamics using RNA footprinting data.
+    Parameters:
+        args.fdfile: string
+            FastD file.
+        args.fsfile: string
+            FastS or EFastS file.
+        args.isoform: string
+            Isoform file generated by 'rsq FastS extend'. \
+            Only required when EFastS file is used as input.
+        args.expression: string, optional
+            Expression file in format: geneid   isoform1    exprs1  \
+            isoform1    exprs2  ...
+        args.maxiter: int
+            Maximum number of iterations.
+        args.threshold: float
+            Threshold for EM algorithm termination.
+        args.outfile: string
+            Output file.
+    '''
+    # Isoform
+    isoform  = collections.OrderedDict()
+    if args.isoform:
+        for line in ngslib.IO.BioReader(args.isoform):
+            isoform[line[0]] = dict((line[2*i+1],int(line[2*i+2])) for i in range(len(line)/2))
+            #isoform[line[0]] = {line[2*i+1]:int(line[2*i+2]) for i in range(len(line)/2)}
+    # Expression constraints
+    exprs = collections.OrderedDict()
+    if args.expression:
+        for line in ngslib.IO.BioReader(args.expression):
+            exprs[line[0]] = dict((line[2*i+1],int(line[2*i+2])) for i in range(len(line)/2))
+            #exprs[line[0]] = {line[2*i+1]:int(line[2*i+2]) for i in range(len(line)/2)}
+    # FastD file
+    FDs = collections.OrderedDict()
+    for fd in rsq.IO.FastDReader(args.fdfile):
+        FDs[fd.name] = fd
+    # FastS file
+    with ngslib.mFile(args.outfile,'w') as ofh:
+        print >>ofh, "geneID\tPercentages\tloop_reads\tstem_reads"
+        for fs in rsq.IO.FastSReader(args.fsfile):
+            if isoform.has_key(fs.name) and len(isoform[fs.name]) >1: # has isoforms
+                pass
+                # Add code here
+            else:
+                fd = FDs[fs.name]
+                Pi,muS,muV = rsq.Algorithm.EM(fd,fs,None,None,args.threshold,args.maxiter)
+            print >>ofh, "{0}\t{1}\t{2}\t{3}".format(fs.name,';'.join(numpy.round(Pi,3).astype('str')),';'.join(numpy.round(muS,3).astype('str')),';'.join(numpy.round(muV,3).astype('str')))
+
+def draw(args):
+    ''' Draw figure given FastS. '''
+    for fs in rsq.IO.FastSReader(args.infile):
+        if args.suffix:
+            fs.name += '_'+args.suffix
+        rsq.Utils.draw(fs,args.format)
+
+def parseFitness(args):
+    ''' Calculate fitness between FastD and FastS. '''
+    with ngslib.mFile(args.outfile,'w') as fitofh:
+        fitofh.write("#name\tloopFit\tstemFit\tfitness\tnumOfStruct\n")
+        # read FastS
+        FS = collections.OrderedDict()
+        duplicate = collections.OrderedDict()
+        print >> sys.stderr, "Reading FastS file: {0} ...".format(args.fsfile)
+        i0 = 0
+        for fs in rsq.IO.FastSReader(args.fsfile):
+            key = fs.seq if args.byseq else fs.name
+            if not FS.has_key(key):
+                FS[key] = fs
+            else:
+                print >> sys.stderr, "Warning: Ignoring duplicate FastD key: {0}".format(key)
+                duplicate [key] = 1
+            i0 += 1
+            if i0 % 100 == 0:
+                print >> sys.stderr, "Processed {0} items ...      \r".format(i0),
+        print >> sys.stderr, "Processed {0} items.".format(i0)
+        print >> sys.stderr
+        # Remove duplicate keys
+        for key in duplicate:
+            FS.pop(key,None)
+        # read FastD
+        i0 = 0
+        i1 = 0
+        print >> sys.stderr, "Reading and processing FastD file: {0} ...".format(args.fdfile)
+        for fd in rsq.IO.FastDReader(args.fdfile):
+            i0 += 1
+            if i0 % 10 == 0:
+                print >> sys.stderr, "Processed {0} items ...      \r".format(i0),
+            tfs = FS.get(fd.seq if args.byseq else fd.name, None)
+            if tfs is None: continue
+            sloops, sstems = sum(fd.loops),sum(fd.stems)
+            depth = 1.0*(sloops+sstems)/len(fd)
+            if sloops == 0 or sstems ==0:
+                depth *= 2.
+            if depth >= args.coverage:
+                i1 += 1
+                fitscore = rsq.Algorithm.fitness(fd,tfs,args.threshold)
+                fitofh.write("{0}\t{1}\t{2}\t{3}\t{4}\n".format(fd.name,fitscore[0],fitscore[1],fitscore[2],numpy.sum(tfs.scores>args.threshold)))
+        print >> sys.stderr, "Processed {0} items.".format(i0)
+        print >> sys.stderr
+        print >> sys.stderr, "{0} items passed coverage (>={1}) filter.".format(i1,args.coverage)
+        print >> sys.stderr, "Fitness scores for {0} items were written into {1}.".format(i1,args.outfile)
+    return
+
+def version():
+    ''' get version. '''
+    return pkg_resources.get_distribution("rsq").version 
+
+class ThreadSafeFile(object):
+    def __init__(self, fname, mode):
+        self.fn = fname
+        self.fh = ngslib.mFile(self.fn,mode)
+        self._lock = Lock()
+    def write(self,lstr):
+        with self._lock:
+            self.fh.write(lstr)
+            self.fh.flush()
+    def __enter__(self):
+        return self
+    def __exit__(self,etype,value,traceback):
+        if self.fn != "stdout":
+            self.fh.close()
+
+# ------------------------------------
+# Classes
+# ------------------------------------
+
+# ------------------------------------
+# Main
+# ------------------------------------
+
+if __name__=="__main__":
+    method,args = ArgParser(sys.argv)
+    methods = {'FastD':{'generate':fastDGenerate,'merge':fastDMerge},'FastC':{'generate':fastCGenerate,'merge':fastCMerge},'fold':parseFold,'FastS':{'merge':fastSMerge},'draw':draw,'fitness':parseFitness,'quantify':quantify,'isoform':{'extend':isoformExtend,'split':isoformSplit}}
+    prog = methods
+    for k in method:
+        prog = prog[k]
+    prog(args)

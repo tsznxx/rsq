@@ -1,0 +1,40 @@
+2.0.3 update:
+	Wiki page from google engine is discontinued. Move to GitHub (https://github.com/tsznxx/rsq/wiki).
+2.0.2 update:
+	Add wCleanTranscriptome.py: remove chr*_XXX relabel duplicate gene names of genepred format annotations. (http://rsqwiki.appspot.com/prep)
+	Add wProfileExtraction.py: Covert BAM file to BigWigfile for fast manipulation. (http://rsqwiki.appspot.com/prep) 
+2.0.1 update:
+	Update all the related examples from MultiFold to RSQ.
+
+2.0.0 update:
+	To be clarify, package name is changed from MultiFold to RSQ (RNA Structurome Quantification).
+
+1.1.11 update:
+	Add "workdir" and "keep" option for sfold, which allow users to decide.
+	Replace fc.constraints.find('|') to '|' in fc.constraints.
+
+1.1.12 update:
+	Genes with duplicate names are ignored to avoid ambiguity.
+	Instead of using tempfile names, here we use sequence names.
+	Replace s.find('(') with '(' in s statement.
+
+1.1.13 update:
+	fix bugs in FastD.toFastC('exclusive') method. New method was used to speed the fisher exact test.
+
+1.1.14 update:
+	add depth function for FastD class
+	add bpReader function to read sfold folded structrues and centroids
+
+1.2.0 update:
+	Add examples folder for demo examples.
+	Fix bugs in Fasta.rc(), which doesn't reverse the sequence.
+
+1.2.1 update:
+	Remove python 2.6 support.
+	updated the requirements list.
+		Removed scipy. Added fisher instead.
+		Removed scikit.
+
+1.2.2 update:
+	Fix sfoldext bugs. Display the warning information of sfold.
+
